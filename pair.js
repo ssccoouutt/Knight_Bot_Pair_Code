@@ -3,7 +3,7 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import zlib from 'zlib'; // Add this import
+import zlib from 'zlib'; // For gzip compression
 
 const router = express.Router();
 
@@ -119,41 +119,12 @@ router.get('/', async (req, res) => {
                         // Generate compressed session string
                         const sessionString = generateSessionString(dirs + '/creds.json');
                         
-                        // MESSAGE 2: Send compressed session string with green copy button
+                        // MESSAGE 2: Send compressed session string as plain text (easy to copy)
                         if (sessionString) {
                             await KnightBot.sendMessage(userJid, {
-                                text: `🔐 *Your Compressed Session String*\n\n\`\`\`${sessionString}\`\`\``,
-                                contextInfo: {
-                                    externalAdReply: {
-                                        title: '📋 Copy Session String',
-                                        body: 'GZIP compressed base64',
-                                        thumbnail: sessionKnight.slice(0, 100), // Small preview
-                                        mediaType: 1,
-                                        renderLargerThumbnail: false,
-                                        sourceUrl: 'https://github.com/ssccoouutt/Knight_Bot_Pair_Code'
-                                    }
-                                }
+                                text: `🔐 *Your Compressed Session String*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Copy the text above between the triple backticks*`
                             });
-                            
-                            // Send interactive button message for easier copying
-                            await KnightBot.sendMessage(userJid, {
-                                text: "✅ *Compressed Session Generated!*\n\n👇 Tap the button below to copy:",
-                                footer: "Knight Bot MD",
-                                buttons: [
-                                    {
-                                        buttonId: "copy_session",
-                                        buttonText: { displayText: "📋 COPY SESSION STRING (GZIP)" },
-                                        type: 1
-                                    }
-                                ],
-                                headerType: 1
-                            });
-                            
-                            // Send the compressed session string again in a copyable format
-                            await KnightBot.sendMessage(userJid, {
-                                text: `*Copy this GZIP compressed session string:*\n\n\`${sessionString}\``
-                            });
-                            console.log("🔐 Compressed session string sent with copy button");
+                            console.log("🔐 Compressed session string sent successfully");
                         }
 
                         // MESSAGE 3: Send video thumbnail with caption
