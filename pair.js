@@ -3,6 +3,7 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
+import zlib from 'zlib'; // Add this import
 
 const router = express.Router();
 
@@ -16,14 +17,9 @@ function removeFile(FilePath) {
     }
 }
 
-// Function to convert creds.json to session string and save as txt
-function saveSessionString(credsPath) {
+// Function to convert creds.json to gzip compressed base64 session string
+function generateSessionString(credsPath) {
     try {
-        if (!fs.existsSync(credsPath)) {
-            console.log(`⚠️ creds.json not found at: ${credsPath}`);
-            return null;
-        }
-        
         const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
         
         // Create a session object with the necessary data
@@ -32,18 +28,27 @@ function saveSessionString(credsPath) {
             version: "1.0"
         };
         
-        // Convert to base64 string with prefix
-        const sessionString = 'KnightBot!' + Buffer.from(JSON.stringify(sessionData)).toString('base64');
+        // Convert to JSON string
+        const jsonString = JSON.stringify(sessionData);
         
-        // Save as txt file in the same directory
+        // Gzip compress the JSON string
+        const compressed = zlib.gzipSync(jsonString);
+        
+        // Convert compressed buffer to base64
+        const base64Compressed = compressed.toString('base64');
+        
+        // Add prefix
+        const sessionString = 'KnightBot!' + base64Compressed;
+        
+        // Save as txt file locally
         const txtPath = credsPath.replace('creds.json', 'session.txt');
         fs.writeFileSync(txtPath, sessionString);
-        console.log(`✅ Session string saved to: ${txtPath}`);
-        console.log(`📝 Session string (first 50 chars): ${sessionString.substring(0, 50)}...`);
+        console.log(`✅ Compressed session string saved to: ${txtPath}`);
+        console.log(`📊 Original size: ${jsonString.length} chars, Compressed size: ${base64Compressed.length} chars`);
         
         return sessionString;
     } catch (error) {
-        console.error('Error saving session string:', error);
+        console.error('Error generating compressed session string:', error);
         return null;
     }
 }
@@ -68,9 +73,6 @@ router.get('/', async (req, res) => {
     }
     // Use the international number format (E.164, without '+')
     num = phone.getNumber('e164').replace('+', '');
-
-    // FLAG to track if we've already processed this number
-    let processingComplete = false;
 
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
@@ -98,23 +100,14 @@ router.get('/', async (req, res) => {
             KnightBot.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
-                // If already processed, ignore
-                if (processingComplete) return;
-
                 if (connection === 'open') {
-                    processingComplete = true;
                     console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session file to user...");
+                    console.log("📱 Sending session file and compressed session string to user...");
                     
                     try {
+                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        const credsPath = dirs + '/creds.json';
                         
-                        // Wait a bit for creds.json to be fully written
-                        await delay(2000);
-                        
-                        const sessionKnight = fs.readFileSync(credsPath);
-
                         // MESSAGE 1: Send session file (creds.json)
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
@@ -123,23 +116,52 @@ router.get('/', async (req, res) => {
                         });
                         console.log("📄 Session file sent successfully");
 
-                        // MESSAGE 2: Send video thumbnail with caption
+                        // Generate compressed session string
+                        const sessionString = generateSessionString(dirs + '/creds.json');
+                        
+                        // MESSAGE 2: Send compressed session string with green copy button
+                        if (sessionString) {
+                            await KnightBot.sendMessage(userJid, {
+                                text: `🔐 *Your Compressed Session String*\n\n\`\`\`${sessionString}\`\`\``,
+                                contextInfo: {
+                                    externalAdReply: {
+                                        title: '📋 Copy Session String',
+                                        body: 'GZIP compressed base64',
+                                        thumbnail: sessionKnight.slice(0, 100), // Small preview
+                                        mediaType: 1,
+                                        renderLargerThumbnail: false,
+                                        sourceUrl: 'https://github.com/ssccoouutt/Knight_Bot_Pair_Code'
+                                    }
+                                }
+                            });
+                            
+                            // Send interactive button message for easier copying
+                            await KnightBot.sendMessage(userJid, {
+                                text: "✅ *Compressed Session Generated!*\n\n👇 Tap the button below to copy:",
+                                footer: "Knight Bot MD",
+                                buttons: [
+                                    {
+                                        buttonId: "copy_session",
+                                        buttonText: { displayText: "📋 COPY SESSION STRING (GZIP)" },
+                                        type: 1
+                                    }
+                                ],
+                                headerType: 1
+                            });
+                            
+                            // Send the compressed session string again in a copyable format
+                            await KnightBot.sendMessage(userJid, {
+                                text: `*Copy this GZIP compressed session string:*\n\n\`${sessionString}\``
+                            });
+                            console.log("🔐 Compressed session string sent with copy button");
+                        }
+
+                        // MESSAGE 3: Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
-
-                        // Generate and save session string locally
-                        const sessionString = saveSessionString(credsPath);
-
-                        // MESSAGE 3: Send session string as text
-                        if (sessionString) {
-                            await KnightBot.sendMessage(userJid, {
-                                text: `🔑 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Save this string for future use!*`
-                            });
-                            console.log("🔑 Session string sent to user");
-                        }
 
                         // MESSAGE 4: Send warning message
                         await KnightBot.sendMessage(userJid, {
@@ -151,16 +173,18 @@ router.get('/', async (req, res) => {
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        console.log("\n📁 FILES SAVED AT: " + dirs);
-                        console.log("   📄 " + credsPath);
-                        console.log("   📝 " + credsPath.replace('creds.json', 'session.txt'));
-                        console.log("✅ Process completed successfully!\n");
-                        
-                        // Close connection gracefully
-                        KnightBot.end();
-                        
+                        // Clean up session after use
+                        console.log("🧹 Cleaning up session...");
+                        await delay(1000);
+                        removeFile(dirs);
+                        console.log("✅ Session cleaned up successfully");
+                        console.log("🎉 Process completed successfully!");
+                        // Do not exit the process, just finish gracefully
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
+                        // Still clean up session even if sending fails
+                        removeFile(dirs);
+                        // Do not exit the process, just finish gracefully
                     }
                 }
 
@@ -172,23 +196,20 @@ router.get('/', async (req, res) => {
                     console.log("📶 Client is online");
                 }
 
-                if (connection === 'close' && !processingComplete) {
+                if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                     if (statusCode === 401) {
                         console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
                     } else {
-                        console.log("🔁 Connection closed — will restart once");
-                        // Only restart if not completed
-                        if (!processingComplete) {
-                            initiateSession();
-                        }
+                        console.log("🔁 Connection closed — restarting...");
+                        initiateSession();
                     }
                 }
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000);
+                await delay(3000); // Wait 3 seconds before requesting pairing code
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
