@@ -4,13 +4,11 @@ import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
 import zlib from 'zlib';
-import { promisify } from 'util';
+import util from 'util';
 
 const router = express.Router();
-const gzip = promisify(zlib.gzip);
-
-// Store active sessions
-const activeSessions = new Map();
+const gzip = util.promisify(zlib.gzip);
+const gunzip = util.promisify(zlib.gunzip);
 
 // Ensure the session directory exists
 function removeFile(FilePath) {
@@ -22,28 +20,32 @@ function removeFile(FilePath) {
     }
 }
 
-// Function to create gzip compressed base64 session string
-async function createCompressedSessionString(credsPath) {
+// NEW FUNCTION: Convert creds.json to gzip compressed base64 session string
+async function createSessionString(credsPath) {
     try {
-        console.log("📁 Reading creds.json from:", credsPath);
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
         
-        const credsData = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-        const jsonString = JSON.stringify(credsData);
-        console.log("📝 creds.json size:", jsonString.length, "bytes");
+        // Create a session object with the necessary data
+        const sessionData = {
+            creds: creds,
+            version: "1.0"
+        };
         
-        const compressed = await gzip(Buffer.from(jsonString));
-        console.log("🗜️ Compressed size:", compressed.length, "bytes");
+        // Convert to JSON string then compress with gzip
+        const jsonString = JSON.stringify(sessionData);
+        const compressedBuffer = await gzip(Buffer.from(jsonString, 'utf-8'));
         
-        const base64String = compressed.toString('base64');
-        console.log("🔐 Base64 length:", base64String.length);
+        // Convert to base64 with prefix
+        const sessionString = 'KnightBot!' + compressedBuffer.toString('base64');
         
+        // Save as txt file in the same directory
         const txtPath = credsPath.replace('creds.json', 'session.txt');
-        fs.writeFileSync(txtPath, base64String);
+        fs.writeFileSync(txtPath, sessionString);
         console.log(`✅ Session string saved to: ${txtPath}`);
         
-        return base64String;
+        return sessionString;
     } catch (error) {
-        console.error('❌ Error creating compressed session string:', error);
+        console.error('Error creating session string:', error);
         return null;
     }
 }
@@ -52,44 +54,36 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
 
-    // Clean the phone number
+    // Remove existing session if present
+    await removeFile(dirs);
+
+    // Clean the phone number - remove any non-digit characters
     num = num.replace(/[^0-9]/g, '');
 
-    // Validate phone number
+    // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
     if (!phone.isValid()) {
-        return res.status(400).send({ 
-            code: 'Invalid phone number. Please enter your full international number without + or spaces.' 
-        });
+        if (!res.headersSent) {
+            return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK, 84987654321 for Vietnam, etc.) without + or spaces.' });
+        }
+        return;
     }
+    // Use the international number format (E.164, without '+')
     num = phone.getNumber('e164').replace('+', '');
-
-    // Check if session already exists for this number
-    if (activeSessions.has(num)) {
-        return res.send({ 
-            success: true,
-            number: num,
-            code: activeSessions.get(num),
-            message: "Session already in progress"
-        });
-    }
-
-    // Remove existing session directory
-    await removeFile(dirs);
 
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
 
         try {
-            const { version } = await fetchLatestBaileysVersion();
+            const { version, isLatest } = await fetchLatestBaileysVersion();
             let KnightBot = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "fatal" }),
+                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
                 browser: Browsers.windows('Chrome'),
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
@@ -97,160 +91,110 @@ router.get('/', async (req, res) => {
                 connectTimeoutMs: 60000,
                 keepAliveIntervalMs: 30000,
                 retryRequestDelayMs: 250,
-                maxRetries: 3,
-                shouldSyncHistoryMessage: false,
-                syncFullHistory: false,
-                fireInitQueries: false,
-                emitOwnEvents: false
+                maxRetries: 5,
             });
 
-            let sessionCompleted = false;
-            let loginAttempted = false;
-
             KnightBot.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, isNewLogin, qr } = update;
+                const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
-                if (connection === 'open' && !sessionCompleted) {
+                if (connection === 'open') {
                     console.log("✅ Connected successfully!");
-                    sessionCompleted = true;
+                    console.log("📱 Sending session files to user...");
                     
                     try {
-                        const credsPath = dirs + '/creds.json';
-                        
-                        // Wait a bit for creds to be fully written
-                        await delay(2000);
-                        
-                        if (!fs.existsSync(credsPath)) {
-                            console.error("❌ creds.json not found!");
-                            return;
-                        }
-                        
-                        const sessionKnight = fs.readFileSync(credsPath);
+                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        
+
                         // MESSAGE 1: Send creds.json file
-                        console.log("📤 Sending creds.json file...");
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
                             fileName: 'creds.json'
                         });
-                        console.log("✅ creds.json file sent successfully");
+                        console.log("📄 creds.json sent successfully");
 
-                        // Create and send session string
-                        console.log("🔐 Creating compressed session string...");
-                        const sessionString = await createCompressedSessionString(credsPath);
+                        // Create and send gzip compressed session string
+                        const sessionString = await createSessionString(dirs + '/creds.json');
                         
-                        if (sessionString) {
-                            console.log("📤 Sending session string...");
-                            
-                            const maxLength = 4096;
-                            if (sessionString.length > maxLength) {
-                                const parts = Math.ceil(sessionString.length / maxLength);
-                                await KnightBot.sendMessage(userJid, {
-                                    text: `🔐 *Your Compressed Session String (${parts} parts):*`
-                                });
-                                
-                                for (let i = 0; i < parts; i++) {
-                                    const start = i * maxLength;
-                                    const end = Math.min(start + maxLength, sessionString.length);
-                                    const part = sessionString.substring(start, end);
-                                    
-                                    await KnightBot.sendMessage(userJid, {
-                                        text: `\`\`\`${part}\`\`\``
-                                    });
-                                }
-                            } else {
-                                await KnightBot.sendMessage(userJid, {
-                                    text: `🔐 *Your Compressed Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📁 Saved as session.txt on server`
-                                });
-                            }
-                            console.log("✅ Session string sent successfully");
-                        }
+                        // MESSAGE 2: Send session string as text message
+                        await KnightBot.sendMessage(userJid, {
+                            text: `🔐 *Your Gzip Compressed Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Save this carefully!*`
+                        });
+                        console.log("🔐 Session string sent successfully");
 
-                        // MESSAGE 3: Send video guide
+                        // MESSAGE 3: Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                            caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
+                            caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
-                        console.log("✅ Video guide sent successfully");
+                        console.log("🎬 Video guide sent successfully");
 
-                        // MESSAGE 4: Send completion message
+                        // MESSAGE 4: Send warning message
                         await KnightBot.sendMessage(userJid, {
-                            text: `✅ *PAIRING COMPLETE!*\n\n📁 Files saved:\n• creds.json\n• session.txt\n\n⚠️ Keep these files secure!\n\n©2025 Mr Unique Hacker`
+                            text: `⚠️ *Do not share these files with anybody* ⚠️\n\n` +
+                                  `┌┤✑  Thanks for using Knight Bot\n` +
+                                  `│└────────────┈ ⳹        \n` +
+                                  `│©2025 Mr Unique Hacker \n` +
+                                  `└─────────────────┈ ⳹\n\n` +
+                                  `📁 *Files saved on server:*\n` +
+                                  `- creds.json\n` +
+                                  `- session.txt (gzip compressed base64)`
                         });
-                        console.log("✅ Completion message sent");
+                        console.log("⚠️ Warning message sent successfully");
 
-                        console.log("\n" + "=".repeat(50));
-                        console.log("🎉 ALL MESSAGES SENT SUCCESSFULLY!");
-                        console.log("=".repeat(50));
-                        
-                        // Remove from active sessions
-                        activeSessions.delete(num);
-                        
-                        // Close connection gracefully
-                        await delay(2000);
-                        KnightBot.end();
+                        console.log("🎉 All messages sent successfully!");
+                        console.log("📁 Files preserved in directory:", dirs);
                         
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
-                        activeSessions.delete(num);
                     }
                 }
 
-                if (connection === 'close' && !sessionCompleted) {
-                    console.log("🔁 Connection closed - reconnecting...");
-                    // Only reconnect if not completed
-                    if (!sessionCompleted && !loginAttempted) {
+                if (isNewLogin) {
+                    console.log("🔐 New login via pair code");
+                }
+
+                if (isOnline) {
+                    console.log("📶 Client is online");
+                }
+
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+
+                    if (statusCode === 401) {
+                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
+                    } else {
+                        console.log("🔁 Connection closed — restarting...");
                         initiateSession();
                     }
                 }
             });
 
-            // Request pairing code if not registered
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000);
-                loginAttempted = true;
-                
+                await delay(3000); // Wait 3 seconds before requesting pairing code
+                num = num.replace(/[^\d+]/g, '');
+                if (num.startsWith('+')) num = num.substring(1);
+
                 try {
-                    console.log(`📱 Requesting pair code for number: ${num}`);
                     let code = await KnightBot.requestPairingCode(num);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
-                    
-                    // Store in active sessions
-                    activeSessions.set(num, code);
-                    
                     if (!res.headersSent) {
-                        console.log("✅ Pair code generated:", { num, code });
-                        await res.send({ 
-                            success: true,
-                            number: num,
-                            code: code,
-                            message: "Enter this code in WhatsApp > Linked Devices"
-                        });
+                        console.log({ num, code });
+                        await res.send({ code });
                     }
                 } catch (error) {
-                    console.error('❌ Error requesting pairing code:', error);
-                    activeSessions.delete(num);
+                    console.error('Error requesting pairing code:', error);
                     if (!res.headersSent) {
-                        res.status(503).send({ 
-                            success: false,
-                            code: 'Failed to get pairing code. Please try again.' 
-                        });
+                        res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
                     }
                 }
             }
 
             KnightBot.ev.on('creds.update', saveCreds);
-            
         } catch (err) {
-            console.error('❌ Error initializing session:', err);
-            activeSessions.delete(num);
+            console.error('Error initializing session:', err);
             if (!res.headersSent) {
-                res.status(503).send({ 
-                    success: false,
-                    code: 'Service Unavailable' 
-                });
+                res.status(503).send({ code: 'Service Unavailable' });
             }
         }
     }
@@ -267,7 +211,12 @@ process.on('uncaughtException', (err) => {
     if (e.includes("rate-overlimit")) return;
     if (e.includes("Connection Closed")) return;
     if (e.includes("Timed Out")) return;
-    console.log('⚠️ Caught exception:', err.message);
+    if (e.includes("Value not found")) return;
+    if (e.includes("Stream Errored")) return;
+    if (e.includes("Stream Errored (restart required)")) return;
+    if (e.includes("statusCode: 515")) return;
+    if (e.includes("statusCode: 503")) return;
+    console.log('Caught exception: ', err);
 });
 
 export default router;
