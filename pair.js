@@ -6,9 +6,6 @@ import pn from 'awesome-phonenumber';
 
 const router = express.Router();
 
-// Track active sessions to prevent duplicates
-const activeSessions = new Set();
-
 // Ensure the session directory exists
 function removeFile(FilePath) {
     try {
@@ -19,7 +16,7 @@ function removeFile(FilePath) {
     }
 }
 
-// NEW FUNCTION: Convert creds.json to session string and save as txt
+// Function to convert creds.json to session string and save as txt
 function saveSessionString(credsPath) {
     try {
         if (!fs.existsSync(credsPath)) {
@@ -55,15 +52,6 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
 
-    // Check if session already exists for this number
-    if (activeSessions.has(num)) {
-        console.log(`⚠️ Session already active for ${num}, ignoring duplicate request`);
-        return res.status(429).send({ code: 'Session already in progress for this number' });
-    }
-    
-    // Add to active sessions
-    activeSessions.add(num);
-
     // Remove existing session if present
     await removeFile(dirs);
 
@@ -73,7 +61,6 @@ router.get('/', async (req, res) => {
     // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
     if (!phone.isValid()) {
-        activeSessions.delete(num);
         if (!res.headersSent) {
             return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK, 84987654321 for Vietnam, etc.) without + or spaces.' });
         }
@@ -81,6 +68,9 @@ router.get('/', async (req, res) => {
     }
     // Use the international number format (E.164, without '+')
     num = phone.getNumber('e164').replace('+', '');
+
+    // FLAG to track if we've already processed this number
+    let processingComplete = false;
 
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
@@ -108,13 +98,22 @@ router.get('/', async (req, res) => {
             KnightBot.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, isNewLogin, isOnline } = update;
 
+                // If already processed, ignore
+                if (processingComplete) return;
+
                 if (connection === 'open') {
+                    processingComplete = true;
                     console.log("✅ Connected successfully!");
                     console.log("📱 Sending session file to user...");
                     
                     try {
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                        const credsPath = dirs + '/creds.json';
+                        
+                        // Wait a bit for creds.json to be fully written
+                        await delay(2000);
+                        
+                        const sessionKnight = fs.readFileSync(credsPath);
 
                         // MESSAGE 1: Send session file (creds.json)
                         await KnightBot.sendMessage(userJid, {
@@ -131,8 +130,8 @@ router.get('/', async (req, res) => {
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // Generate and save session string locally (BEFORE deleting)
-                        const sessionString = saveSessionString(dirs + '/creds.json');
+                        // Generate and save session string locally
+                        const sessionString = saveSessionString(credsPath);
 
                         // MESSAGE 3: Send session string as text
                         if (sessionString) {
@@ -152,24 +151,16 @@ router.get('/', async (req, res) => {
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        console.log("📁 Files are saved at: " + dirs);
-                        console.log("   - " + dirs + "/creds.json");
-                        console.log("   - " + dirs + "/session.txt");
-                        console.log("💾 These files will NOT be deleted");
+                        console.log("\n📁 FILES SAVED AT: " + dirs);
+                        console.log("   📄 " + credsPath);
+                        console.log("   📝 " + credsPath.replace('creds.json', 'session.txt'));
+                        console.log("✅ Process completed successfully!\n");
                         
-                        // DO NOT delete files - comment out removeFile
-                        // console.log("🧹 Cleaning up session...");
-                        // await delay(1000);
-                        // removeFile(dirs);
-                        
-                        console.log("✅ Process completed successfully!");
-                        
-                        // Remove from active sessions
-                        activeSessions.delete(num);
+                        // Close connection gracefully
+                        KnightBot.end();
                         
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
-                        activeSessions.delete(num);
                     }
                 }
 
@@ -181,23 +172,23 @@ router.get('/', async (req, res) => {
                     console.log("📶 Client is online");
                 }
 
-                if (connection === 'close') {
+                if (connection === 'close' && !processingComplete) {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                     if (statusCode === 401) {
                         console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
-                        activeSessions.delete(num);
                     } else {
-                        console.log("🔁 Connection closed — NOT restarting to prevent duplicates");
-                        // Don't restart to prevent duplicates
-                        // initiateSession();
-                        activeSessions.delete(num);
+                        console.log("🔁 Connection closed — will restart once");
+                        // Only restart if not completed
+                        if (!processingComplete) {
+                            initiateSession();
+                        }
                     }
                 }
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000); // Wait 3 seconds before requesting pairing code
+                await delay(3000);
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
@@ -213,7 +204,6 @@ router.get('/', async (req, res) => {
                     if (!res.headersSent) {
                         res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
                     }
-                    activeSessions.delete(num);
                 }
             }
 
@@ -223,7 +213,6 @@ router.get('/', async (req, res) => {
             if (!res.headersSent) {
                 res.status(503).send({ code: 'Service Unavailable' });
             }
-            activeSessions.delete(num);
         }
     }
 
