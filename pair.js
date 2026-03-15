@@ -3,16 +3,13 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import zlib from 'zlib';
+import zlib from 'zlib'; // Added for gzip compression
+import { promisify } from 'util';
 
 const router = express.Router();
+const gzip = promisify(zlib.gzip); // For async compression
 
-// Create a permanent directory for saved sessions
-const SAVED_SESSIONS_DIR = './saved_sessions';
-if (!fs.existsSync(SAVED_SESSIONS_DIR)) {
-    fs.mkdirSync(SAVED_SESSIONS_DIR, { recursive: true });
-}
-
+// Ensure the session directory exists
 function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
@@ -22,36 +19,34 @@ function removeFile(FilePath) {
     }
 }
 
-// Function to convert creds.json to gzip compressed base64 session string
-function generateSessionString(credsPath, phoneNumber) {
+// Function to create gzip compressed base64 session string
+async function createCompressedSessionString(credsPath) {
     try {
         const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
         
+        // Create a session object with the necessary data
         const sessionData = {
             creds: creds,
             version: "1.0"
         };
         
+        // Convert to JSON string
         const jsonString = JSON.stringify(sessionData);
-        const compressed = zlib.gzipSync(jsonString);
-        const base64Compressed = compressed.toString('base64');
-        const sessionString = 'KnightBot!' + base64Compressed;
         
-        // Save to PERMANENT location (not in temp session dir)
-        const permanentTxtPath = `${SAVED_SESSIONS_DIR}/${phoneNumber}_session.txt`;
-        fs.writeFileSync(permanentTxtPath, sessionString);
-        console.log(`✅ Session string PERMANENTLY saved to: ${permanentTxtPath}`);
+        // Compress with gzip
+        const compressed = await gzip(Buffer.from(jsonString));
         
-        // Also save creds.json permanently
-        const permanentCredsPath = `${SAVED_SESSIONS_DIR}/${phoneNumber}_creds.json`;
-        fs.copyFileSync(credsPath, permanentCredsPath);
-        console.log(`✅ creds.json PERMANENTLY saved to: ${permanentCredsPath}`);
+        // Convert to base64 with prefix
+        const sessionString = 'KnightBot!' + compressed.toString('base64');
         
-        console.log(`📊 Original size: ${jsonString.length} chars, Compressed size: ${base64Compressed.length} chars`);
+        // Save as txt file in the same directory
+        const txtPath = credsPath.replace('creds.json', 'session.txt');
+        fs.writeFileSync(txtPath, sessionString);
+        console.log(`✅ Session string saved to: ${txtPath}`);
         
         return sessionString;
     } catch (error) {
-        console.error('Error generating compressed session string:', error);
+        console.error('Error creating compressed session string:', error);
         return null;
     }
 }
@@ -60,10 +55,13 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
 
+    // Remove existing session if present
     await removeFile(dirs);
 
+    // Clean the phone number - remove any non-digit characters
     num = num.replace(/[^0-9]/g, '');
 
+    // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
     if (!phone.isValid()) {
         if (!res.headersSent) {
@@ -71,6 +69,7 @@ router.get('/', async (req, res) => {
         }
         return;
     }
+    // Use the international number format (E.164, without '+')
     num = phone.getNumber('e164').replace('+', '');
 
     async function initiateSession() {
@@ -101,13 +100,14 @@ router.get('/', async (req, res) => {
 
                 if (connection === 'open') {
                     console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session file and compressed session string to user...");
+                    console.log("📱 Sending session files to user...");
                     
                     try {
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        
+                        const credsPath = dirs + '/creds.json';
+                        const sessionKnight = fs.readFileSync(credsPath);
+
                         // MESSAGE 1: Send session file (creds.json)
+                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
@@ -115,18 +115,18 @@ router.get('/', async (req, res) => {
                         });
                         console.log("📄 Session file sent successfully");
 
-                        // Generate compressed session string and SAVE PERMANENTLY
-                        const sessionString = generateSessionString(dirs + '/creds.json', num);
+                        // Create compressed session string
+                        const sessionString = await createCompressedSessionString(credsPath);
                         
-                        // MESSAGE 2: Send compressed session string
                         if (sessionString) {
+                            // MESSAGE 2: Send session string as text
                             await KnightBot.sendMessage(userJid, {
-                                text: `🔐 *Your Compressed Session String*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Copy the text above between the triple backticks*`
+                                text: `🔐 *Your Compressed Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📁 *Also saved as session.txt on server*`
                             });
-                            console.log("🔐 Compressed session string sent successfully");
+                            console.log("🔐 Session string sent successfully");
                         }
 
-                        // MESSAGE 3: Send video thumbnail
+                        // MESSAGE 3: Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
@@ -135,26 +135,25 @@ router.get('/', async (req, res) => {
 
                         // MESSAGE 4: Send warning message
                         await KnightBot.sendMessage(userJid, {
-                            text: `⚠️Do not share this file with anybody⚠️\n 
+                            text: `⚠️ *Do not share these files with anybody* ⚠️\n
 ┌┤✑  Thanks for using Knight Bot
 │└────────────┈ ⳹        
 │©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
+└─────────────────┈ ⳹
+
+📁 *Files saved on server:* creds.json and session.txt
+🔐 *Session string sent above*`
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        // Clean up temp session only
-                        console.log("🧹 Cleaning up temp session...");
-                        await delay(1000);
-                        removeFile(dirs);
-                        console.log("✅ Temp session cleaned up");
-                        console.log("💾 PERMANENT files saved in: ./saved_sessions/");
-                        console.log(`   - ${num}_session.txt`);
-                        console.log(`   - ${num}_creds.json`);
+                        console.log("🎉 All messages sent successfully!");
+                        console.log("📁 Files are preserved in the session directory");
+                        
+                        // DO NOT DELETE FILES - They are preserved
                         
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
-                        removeFile(dirs);
+                        // Files are still preserved even on error
                     }
                 }
 
@@ -179,7 +178,7 @@ router.get('/', async (req, res) => {
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000);
+                await delay(3000); // Wait 3 seconds before requesting pairing code
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
@@ -210,6 +209,7 @@ router.get('/', async (req, res) => {
     await initiateSession();
 });
 
+// Global uncaught exception handler
 process.on('uncaughtException', (err) => {
     let e = String(err);
     if (e.includes("conflict")) return;
