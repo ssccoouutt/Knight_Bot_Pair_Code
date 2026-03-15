@@ -19,6 +19,11 @@ function removeFile(FilePath) {
 // Function to convert creds.json to session string and save as txt
 function saveSessionString(credsPath) {
     try {
+        if (!fs.existsSync(credsPath)) {
+            console.log(`⚠️ creds.json not found at: ${credsPath}`);
+            return null;
+        }
+        
         const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
         
         // Create a session object with the necessary data
@@ -95,7 +100,17 @@ router.get('/', async (req, res) => {
                     console.log("📱 Sending session file to user...");
                     
                     try {
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                        // DEFINE userJid HERE - THIS WAS MISSING!
+                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+                        
+                        // Check if creds.json exists
+                        const credsPath = dirs + '/creds.json';
+                        if (!fs.existsSync(credsPath)) {
+                            console.error("❌ creds.json not found!");
+                            return;
+                        }
+                        
+                        const sessionKnight = fs.readFileSync(credsPath);
 
                         // MESSAGE 1: Send session file (creds.json)
                         await KnightBot.sendMessage(userJid, {
@@ -106,7 +121,7 @@ router.get('/', async (req, res) => {
                         console.log("📄 Session file sent successfully");
 
                         // SAVE SESSION STRING TO TXT (NOT SENT TO WHATSAPP)
-                        const sessionString = saveSessionString(dirs + '/creds.json');
+                        const sessionString = saveSessionString(credsPath);
 
                         // MESSAGE 2: Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
@@ -115,7 +130,7 @@ router.get('/', async (req, res) => {
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // MESSAGE 3: Send warning message (ONLY 3 MESSAGES TOTAL)
+                        // MESSAGE 3: Send warning message
                         await KnightBot.sendMessage(userJid, {
                             text: `⚠️Do not share this file with anybody⚠️\n 
 ┌┤✑  Thanks for using Knight Bot
@@ -132,12 +147,9 @@ router.get('/', async (req, res) => {
                         console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
                         console.log("💾 Session string was saved as session.txt (not sent to WhatsApp)");
-                        // Do not exit the process, just finish gracefully
+                        
                     } catch (error) {
-                        console.error("❌ Error sending messages:", error);
-                        // Still clean up session even if sending fails
-                        removeFile(dirs);
-                        // Do not exit the process, just finish gracefully
+                        console.error("❌ Error in message sending:", error);
                     }
                 }
 
@@ -151,18 +163,12 @@ router.get('/', async (req, res) => {
 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
-
-                    if (statusCode === 401) {
-                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
-                    } else {
-                        console.log("🔁 Connection closed — restarting...");
-                        initiateSession();
-                    }
+                    console.log("🔁 Connection closed — restarting...");
                 }
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000); // Wait 3 seconds before requesting pairing code
+                await delay(3000);
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
