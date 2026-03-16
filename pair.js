@@ -3,12 +3,8 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import zlib from 'zlib';
-import util from 'util';
 
 const router = express.Router();
-const gzip = util.promisify(zlib.gzip);
-const gunzip = util.promisify(zlib.gunzip);
 
 // Ensure the session directory exists
 function removeFile(FilePath) {
@@ -17,36 +13,6 @@ function removeFile(FilePath) {
         fs.rmSync(FilePath, { recursive: true, force: true });
     } catch (e) {
         console.error('Error removing file:', e);
-    }
-}
-
-// NEW FUNCTION: Convert creds.json to gzip compressed base64 session string
-async function createSessionString(credsPath) {
-    try {
-        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-        
-        // Create a session object with the necessary data
-        const sessionData = {
-            creds: creds,
-            version: "1.0"
-        };
-        
-        // Convert to JSON string then compress with gzip
-        const jsonString = JSON.stringify(sessionData);
-        const compressedBuffer = await gzip(Buffer.from(jsonString, 'utf-8'));
-        
-        // Convert to base64 with prefix
-        const sessionString = 'KnightBot!' + compressedBuffer.toString('base64');
-        
-        // Save as txt file in the same directory
-        const txtPath = credsPath.replace('creds.json', 'session.txt');
-        fs.writeFileSync(txtPath, sessionString);
-        console.log(`✅ Session string saved to: ${txtPath}`);
-        
-        return sessionString;
-    } catch (error) {
-        console.error('Error creating session string:', error);
-        return null;
     }
 }
 
@@ -99,54 +65,49 @@ router.get('/', async (req, res) => {
 
                 if (connection === 'open') {
                     console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session files to user...");
+                    console.log("📱 Sending session file to user...");
                     
                     try {
                         const sessionKnight = fs.readFileSync(dirs + '/creds.json');
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
 
-                        // MESSAGE 1: Send creds.json file
+                        // Send session file to user
+                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
                             fileName: 'creds.json'
                         });
-                        console.log("📄 creds.json sent successfully");
+                        console.log("📄 Session file sent successfully");
 
-                        // Create and send gzip compressed session string
-                        const sessionString = await createSessionString(dirs + '/creds.json');
-                        
-                        // MESSAGE 2: Send session string as text message
-                        await KnightBot.sendMessage(userJid, {
-                            text: `🔐 *Your Gzip Compressed Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Save this carefully!*`
-                        });
-                        console.log("🔐 Session string sent successfully");
-
-                        // MESSAGE 3: Send video thumbnail with caption
+                        // Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // MESSAGE 4: Send warning message
+                        // Send warning message
                         await KnightBot.sendMessage(userJid, {
-                            text: `⚠️ *Do not share these files with anybody* ⚠️\n\n` +
-                                  `┌┤✑  Thanks for using Knight Bot\n` +
-                                  `│└────────────┈ ⳹        \n` +
-                                  `│©2025 Mr Unique Hacker \n` +
-                                  `└─────────────────┈ ⳹\n\n` +
-                                  `📁 *Files saved on server:*\n` +
-                                  `- creds.json\n` +
-                                  `- session.txt (gzip compressed base64)`
+                            text: `⚠️Do not share this file with anybody⚠️\n 
+┌┤✑  Thanks for using Knight Bot
+│└────────────┈ ⳹        
+│©2025 Mr Unique Hacker 
+└─────────────────┈ ⳹\n\n`
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        console.log("🎉 All messages sent successfully!");
-                        console.log("📁 Files preserved in directory:", dirs);
-                        
+                        // Clean up session after use
+                        console.log("🧹 Cleaning up session...");
+                        await delay(1000);
+                        removeFile(dirs);
+                        console.log("✅ Session cleaned up successfully");
+                        console.log("🎉 Process completed successfully!");
+                        // Do not exit the process, just finish gracefully
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
+                        // Still clean up session even if sending fails
+                        removeFile(dirs);
+                        // Do not exit the process, just finish gracefully
                     }
                 }
 
