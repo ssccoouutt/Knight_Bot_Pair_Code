@@ -3,7 +3,6 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import zlib from 'zlib'; // Add this import
 
 const router = express.Router();
 
@@ -14,35 +13,6 @@ function removeFile(FilePath) {
         fs.rmSync(FilePath, { recursive: true, force: true });
     } catch (e) {
         console.error('Error removing file:', e);
-    }
-}
-
-// NEW FUNCTION: Generate gzip compressed base64 session string
-function generateSessionString(credsPath) {
-    try {
-        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-        
-        // Step 1: Convert to JSON string (compact without spaces)
-        const jsonString = JSON.stringify(creds, null, 0); // 0 = no spaces
-        
-        // Step 2: Compress with gzip
-        const compressedData = zlib.gzipSync(jsonString);
-        
-        // Step 3: Convert to base64
-        const base64Data = compressedData.toString('base64');
-        
-        // Step 4: Add KnightBot! prefix
-        const sessionString = `KnightBot!${base64Data}`;
-        
-        // Save as txt file
-        const txtPath = credsPath.replace('creds.json', 'session.txt');
-        fs.writeFileSync(txtPath, sessionString);
-        console.log(`✅ Session string saved to: ${txtPath}`);
-        
-        return sessionString;
-    } catch (error) {
-        console.error('Error generating session string:', error);
-        return null;
     }
 }
 
@@ -99,9 +69,9 @@ router.get('/', async (req, res) => {
                     
                     try {
                         const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+
+                        // Send session file to user
                         const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        
-                        // MESSAGE 1: Send creds.json file
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
@@ -109,25 +79,14 @@ router.get('/', async (req, res) => {
                         });
                         console.log("📄 Session file sent successfully");
 
-                        // Generate session string
-                        const sessionString = generateSessionString(dirs + '/creds.json');
-                        
-                        // MESSAGE 2: Send session string as text message (if generated successfully)
-                        if (sessionString) {
-                            await KnightBot.sendMessage(userJid, {
-                                text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_Keep this safe! Do not share with anyone._`
-                            });
-                            console.log("🔐 Session string sent successfully");
-                        }
-
-                        // MESSAGE 3: Send video thumbnail with caption
+                        // Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // MESSAGE 4: Send warning message
+                        // Send warning message
                         await KnightBot.sendMessage(userJid, {
                             text: `⚠️Do not share this file with anybody⚠️\n 
 ┌┤✑  Thanks for using Knight Bot
@@ -137,14 +96,18 @@ router.get('/', async (req, res) => {
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        // NO CLEANUP - Keep all files as requested
-                        console.log("✅ All messages sent successfully!");
-                        console.log("📁 Session files kept in:", dirs);
-                        console.log("📝 Session string saved as: session.txt");
+                        // Clean up session after use
+                        console.log("🧹 Cleaning up session...");
+                        await delay(1000);
+                        removeFile(dirs);
+                        console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
-                        
+                        // Do not exit the process, just finish gracefully
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
+                        // Still clean up session even if sending fails
+                        removeFile(dirs);
+                        // Do not exit the process, just finish gracefully
                     }
                 }
 
