@@ -4,8 +4,10 @@ import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
 import zlib from 'zlib';
+import giftedBtns from 'gifted-btns';
 
 const router = express.Router();
+const { sendButtons } = giftedBtns;
 
 // Ensure the session directory exists
 function removeFile(FilePath) {
@@ -37,10 +39,53 @@ function generateSessionString(credsPath) {
     }
 }
 
+// Function to send session string with copy button using gifted-btns
+async function sendSessionWithCopyButton(sock, userJid, sessionString) {
+    try {
+        // Create copy button for the session string
+        const buttons = [{
+            name: 'cta_copy',
+            buttonParamsJson: JSON.stringify({
+                display_text: '📋 Copy Session String',
+                copy_code: sessionString
+            })
+        }];
+
+        const messageText = `🔐 *Your Session String*\n\n` +
+                           `⚠️ *IMPORTANT:* Save this string securely!\n\n` +
+                           `\`\`\`${sessionString}\`\`\`\n\n` +
+                           `_👇 Click the button below to copy the session string_\n\n` +
+                           `*Keep this safe! Do not share with anyone.*`;
+
+        // Send with gifted-btns
+        await sendButtons(sock, userJid, {
+            text: messageText,
+            footer: 'KnightBot Session',
+            buttons: buttons,
+            aimode: true
+        });
+        
+        console.log("🔐 Session string sent with copy button using gifted-btns");
+        return true;
+    } catch (error) {
+        console.error('Error sending with gifted-btns:', error);
+        // Fallback: Send as normal text if gifted-btns fails
+        try {
+            await sock.sendMessage(userJid, {
+                text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._`
+            });
+            console.log("🔐 Session string sent as plain text fallback");
+        } catch (fallbackError) {
+            console.error('Fallback also failed:', fallbackError);
+        }
+        return false;
+    }
+}
+
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
-    let messagesSent = false; // Track if messages were sent
+    let messagesSent = false;
 
     // Remove existing session if present
     await removeFile(dirs);
@@ -88,7 +133,6 @@ router.get('/', async (req, res) => {
                 if (connection === 'open') {
                     console.log("✅ Connected successfully!");
                     
-                    // Only send messages once
                     if (!messagesSent) {
                         messagesSent = true;
                         console.log("📱 Sending session files to user...");
@@ -105,36 +149,15 @@ router.get('/', async (req, res) => {
                             });
                             console.log("📄 creds.json sent successfully");
 
-                            // Generate and send session string with copy button
+                            // Generate session string
                             const sessionString = generateSessionString(dirs + '/creds.json');
+                            
+                            // Send session string with copy button using gifted-btns
                             if (sessionString) {
-                                // Create interactive button message for copying
-                                const buttonMessage = {
-                                    text: `🔐 *Your Session String:*\n\n⚠️ *IMPORTANT:* Save this string securely!\n\n\`\`\`${sessionString}\`\`\`\n\n_👇 Click the button below to copy the session string_`,
-                                    footer: 'KnightBot Session',
-                                    buttons: [
-                                        {
-                                            buttonId: 'copy_session',
-                                            buttonText: { displayText: '📋 COPY SESSION STRING' },
-                                            type: 1
-                                        }
-                                    ],
-                                    viewOnce: false
-                                };
-                                
-                                try {
-                                    await KnightBot.sendMessage(userJid, buttonMessage);
-                                    console.log("🔐 Session string sent with copy button");
-                                } catch (buttonError) {
-                                    // Fallback if buttons not supported
-                                    await KnightBot.sendMessage(userJid, {
-                                        text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._`
-                                    });
-                                    console.log("🔐 Session string sent as plain text");
-                                }
+                                await sendSessionWithCopyButton(KnightBot, userJid, sessionString);
                             }
 
-                            // Send warning message only
+                            // Send warning message
                             await KnightBot.sendMessage(userJid, {
                                 text: `⚠️ *DO NOT SHARE THESE FILES WITH ANYBODY* ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ *Session files sent successfully!*\n📁 Save your creds.json and session.txt`
                             });
@@ -144,14 +167,13 @@ router.get('/', async (req, res) => {
                             
                             // Clean up session after use
                             console.log("🧹 Cleaning up session...");
-                            await delay(2000); // Wait 2 seconds for messages to be delivered
+                            await delay(2000);
                             removeFile(dirs);
                             console.log("✅ Session cleaned up successfully");
                             console.log("🎉 Process completed successfully!");
                             
                         } catch (error) {
                             console.error("❌ Error sending messages:", error);
-                            // Still clean up session even if sending fails
                             await delay(1000);
                             removeFile(dirs);
                         }
@@ -179,7 +201,7 @@ router.get('/', async (req, res) => {
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000); // Wait 3 seconds before requesting pairing code
+                await delay(3000);
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
