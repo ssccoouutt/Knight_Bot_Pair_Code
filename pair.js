@@ -7,7 +7,7 @@ import zlib from 'zlib';
 
 const router = express.Router();
 
-// Store active sessions to prevent duplicates
+// Store active sessions
 const activeSessions = new Map();
 
 function removeFile(FilePath) {
@@ -38,64 +38,13 @@ function generateSessionString(credsPath) {
     }
 }
 
-// Function to create interactive buttons with copy functionality
-async function sendInteractiveMessage(sock, userJid, sessionString) {
-    try {
-        // Create a button template for copying session string
-        const copyButton = {
-            text: "📋 Copy Session String",
-            callbackData: "copy_session"
-        };
-        
-        // Send session string with copy button using Baileys native buttons
-        await sock.sendMessage(userJid, {
-            text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_👇 Click the button below to copy_\n\n⚠️ *Keep this safe! Do not share with anyone.*`,
-            buttons: [
-                {
-                    buttonId: 'copy_session',
-                    buttonText: { displayText: '📋 Copy Session String' },
-                    type: 1
-                }
-            ],
-            viewOnce: false
-        });
-        
-        console.log("🔐 Session string sent with copy button");
-        return true;
-    } catch (buttonError) {
-        // Fallback: Send as normal text if buttons fail
-        console.log("Buttons not supported, sending as normal text");
-        await sock.sendMessage(userJid, {
-            text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._`
-        });
-        return false;
-    }
-}
-
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
     let isCompleted = false;
     let socketInstance = null;
+    let responseSent = false;
     
-    // Check if session already active for this number
-    if (activeSessions.has(num)) {
-        console.log(`⚠️ Session already active for ${num}, cleaning up first...`);
-        const oldSession = activeSessions.get(num);
-        if (oldSession.socket) {
-            try {
-                await oldSession.socket.end(new Error("New session requested"));
-            } catch(e) {}
-        }
-        if (oldSession.directory && fs.existsSync(oldSession.directory)) {
-            removeFile(oldSession.directory);
-        }
-        activeSessions.delete(num);
-    }
-
-    // Remove existing session if present
-    await removeFile(dirs);
-
     // Clean the phone number
     num = num.replace(/[^0-9]/g, '');
 
@@ -109,10 +58,56 @@ router.get('/', async (req, res) => {
     }
     num = phone.getNumber('e164').replace('+', '');
 
+    // Check if session already exists for this number
+    if (activeSessions.has(num)) {
+        console.log(`⚠️ Session already active for ${num}, cleaning up...`);
+        const oldSession = activeSessions.get(num);
+        if (oldSession.socket) {
+            try {
+                await oldSession.socket.end(new Error("New session requested"));
+            } catch(e) {}
+        }
+        if (oldSession.directory && fs.existsSync(oldSession.directory)) {
+            removeFile(oldSession.directory);
+        }
+        activeSessions.delete(num);
+    }
+
+    // Remove existing session directory
+    if (fs.existsSync(dirs)) {
+        await removeFile(dirs);
+    }
+
+    async function cleanup() {
+        if (isCompleted) return;
+        isCompleted = true;
+        
+        console.log(`🧹 Cleaning up session for +${num}...`);
+        
+        try {
+            if (socketInstance) {
+                await socketInstance.logout();
+                await socketInstance.end(new Error("Session completed"));
+                if (socketInstance.ws) {
+                    socketInstance.ws.close();
+                }
+            }
+        } catch(e) {
+            console.log("Error during cleanup:", e.message);
+        }
+        
+        await delay(2000);
+        
+        if (fs.existsSync(dirs)) {
+            removeFile(dirs);
+        }
+        
+        activeSessions.delete(num);
+        console.log(`✅ Cleanup completed for +${num}`);
+    }
+
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
-        let responseSent = false;
-        let messagesSent = false;
 
         try {
             const { version } = await fetchLatestBaileysVersion();
@@ -128,17 +123,16 @@ router.get('/', async (req, res) => {
                 browser: Browsers.windows('Chrome'),
                 markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
-                defaultQueryTimeoutMs: 30000,
-                connectTimeoutMs: 30000,
-                keepAliveIntervalMs: 0, // Disable keep-alive
-                retryRequestDelayMs: 0, // No retries
-                maxRetries: 0, // No retries
-                // CRITICAL: Disable auto reconnect
-                shouldReconnect: () => false,
-                // Disable background sync
-                syncFullHistory: false,
-                // Don't load any messages
-                patchHistoryBefore: false
+                defaultQueryTimeoutMs: 60000,
+                connectTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
+                retryRequestDelayMs: 250,
+                maxRetries: 3,
+                // Allow reconnection only during pairing process
+                shouldReconnect: () => {
+                    // Only reconnect if not completed
+                    return !isCompleted;
+                }
             });
             
             // Store in active sessions
@@ -148,16 +142,16 @@ router.get('/', async (req, res) => {
                 startTime: Date.now()
             });
 
-            // Connection update handler
+            // Handle connection updates
             socketInstance.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect } = update;
+                const { connection, lastDisconnect, isNewLogin } = update;
 
                 if (connection === 'open') {
                     console.log(`✅ Connected successfully for +${num}!`);
-                    console.log(`📱 Sending session files to +${num}...`);
                     
-                    if (!messagesSent) {
-                        messagesSent = true;
+                    // Only send messages if not already completed
+                    if (!isCompleted) {
+                        console.log(`📱 Sending session files to +${num}...`);
                         
                         try {
                             const sessionKnight = fs.readFileSync(dirs + '/creds.json');
@@ -171,12 +165,13 @@ router.get('/', async (req, res) => {
                             });
                             console.log("📄 Session file sent successfully");
 
-                            // Generate session string
+                            // Generate and send session string
                             const sessionString = generateSessionString(dirs + '/creds.json');
-                            
-                            // Send session string with copy button
                             if (sessionString) {
-                                await sendInteractiveMessage(socketInstance, userJid, sessionString);
+                                await socketInstance.sendMessage(userJid, {
+                                    text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_Keep this safe! Do not share with anyone._`
+                                });
+                                console.log("🔐 Session string sent successfully");
                             }
 
                             // Send video thumbnail
@@ -188,57 +183,28 @@ router.get('/', async (req, res) => {
 
                             // Send warning message
                             await socketInstance.sendMessage(userJid, {
-                                text: `⚠️ *DO NOT SHARE THIS FILE WITH ANYBODY* ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ *Session will now expire automatically*`
+                                text: `⚠️ Do not share this file with anybody ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ Session will be cleaned up in 5 seconds...`
                             });
                             console.log("⚠️ Warning message sent successfully");
 
                             console.log(`✅ All messages sent successfully to +${num}!`);
                             
-                            // CRITICAL: Force disconnect and cleanup immediately
-                            console.log(`🧹 Force cleaning up session for +${num}...`);
-                            
-                            // Kill the connection immediately
-                            if (socketInstance) {
-                                try {
-                                    await socketInstance.logout();
-                                    await socketInstance.end(new Error("Session completed - cleanup"));
-                                } catch(e) {
-                                    console.log("Socket already closed");
+                            // Wait 5 seconds then cleanup
+                            setTimeout(async () => {
+                                if (!isCompleted) {
+                                    console.log(`🧹 Cleaning up after successful message delivery...`);
+                                    await cleanup();
                                 }
-                            }
-                            
-                            // Delete session files
-                            await delay(1000);
-                            if (!isCompleted) {
-                                isCompleted = true;
-                                removeFile(dirs);
-                                activeSessions.delete(num);
-                                console.log(`✅ Session files cleaned up for +${num}`);
-                                console.log(`🎉 Process completed successfully for +${num}!`);
-                                
-                                // Send HTTP response if not sent yet
-                                if (!res.headersSent && !responseSent) {
-                                    responseSent = true;
-                                    res.send({ 
-                                        success: true, 
-                                        message: `Session generated and sent to +${num}`,
-                                        number: num
-                                    });
-                                }
-                                
-                                // Force process to be ready for next request
-                                process.nextTick(() => {
-                                    if (socketInstance) {
-                                        try {
-                                            socketInstance.ws?.close();
-                                        } catch(e) {}
-                                    }
-                                });
-                            }
+                            }, 5000);
                             
                         } catch (error) {
                             console.error(`❌ Error sending messages to +${num}:`, error);
-                            await cleanup();
+                            // Still cleanup after error
+                            setTimeout(async () => {
+                                if (!isCompleted) {
+                                    await cleanup();
+                                }
+                            }, 5000);
                         }
                     }
                 }
@@ -247,14 +213,19 @@ router.get('/', async (req, res) => {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     console.log(`🔌 Connection closed for +${num} with status: ${statusCode}`);
                     
-                    // Only cleanup if not already completed
-                    if (!isCompleted) {
+                    // Don't cleanup on close unless it's an auth error or we're completed
+                    if (statusCode === 401) {
+                        console.log("❌ Authentication failed - cleaning up");
                         await cleanup();
+                    } else if (isCompleted) {
+                        console.log("✅ Session already cleaned up");
+                    } else {
+                        console.log("🔄 Connection closed but waiting for pairing...");
                     }
                 }
             });
 
-            // Handle creds update
+            // Save creds when updated
             socketInstance.ev.on('creds.update', async () => {
                 await saveCreds();
             });
@@ -262,62 +233,54 @@ router.get('/', async (req, res) => {
             // Request pairing code if not registered
             if (!socketInstance.authState.creds.registered) {
                 await delay(3000);
-                num = num.replace(/[^\d+]/g, '');
-                if (num.startsWith('+')) num = num.substring(1);
+                let cleanNum = num.replace(/[^\d+]/g, '');
+                if (cleanNum.startsWith('+')) cleanNum = cleanNum.substring(1);
 
                 try {
-                    let code = await socketInstance.requestPairingCode(num);
+                    let code = await socketInstance.requestPairingCode(cleanNum);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    
                     if (!res.headersSent && !responseSent) {
                         responseSent = true;
-                        console.log(`Pairing code for +${num}: ${code}`);
-                        await res.send({ code, number: num });
+                        console.log(`📱 Pairing code for +${num}: ${code}`);
+                        res.send({ 
+                            code: code, 
+                            number: num,
+                            message: "Enter this code in WhatsApp → Settings → Linked Devices → Link a Device"
+                        });
                     }
                 } catch (error) {
                     console.error('Error requesting pairing code:', error);
                     if (!res.headersSent && !responseSent) {
                         responseSent = true;
-                        res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
+                        res.status(503).send({ 
+                            code: 'Failed to get pairing code. Please check your phone number and try again.' 
+                        });
                     }
                     await cleanup();
                 }
             } else {
+                // Already has valid credentials
                 if (!res.headersSent && !responseSent) {
                     responseSent = true;
-                    res.send({ status: "Already registered, connecting..." });
+                    res.send({ 
+                        status: "Already registered, connecting...",
+                        number: num 
+                    });
                 }
             }
             
-            // Set timeout for cleanup (3 minutes)
+            // Set a longer timeout for cleanup (10 minutes)
+            // This gives user time to enter the code
             setTimeout(async () => {
-                if (!isCompleted) {
+                if (!isCompleted && socketInstance?.authState?.creds?.registered) {
                     console.log(`⚠️ Session timeout for +${num} - cleaning up...`);
                     await cleanup();
+                } else if (!isCompleted) {
+                    console.log(`⚠️ Session timeout for +${num} - no pairing completed, cleaning up...`);
+                    await cleanup();
                 }
-            }, 180000);
-            
-            async function cleanup() {
-                if (isCompleted) return;
-                isCompleted = true;
-                
-                console.log(`🧹 Cleaning up session for +${num}...`);
-                
-                try {
-                    if (socketInstance) {
-                        await socketInstance.end(new Error("Cleanup"));
-                    }
-                } catch(e) {}
-                
-                await delay(1000);
-                removeFile(dirs);
-                activeSessions.delete(num);
-                console.log(`✅ Cleanup completed for +${num}`);
-                
-                if (!res.headersSent && !responseSent) {
-                    responseSent = true;
-                    res.send({ status: "Session completed" });
-                }
-            }
+            }, 600000); // 10 minutes timeout
             
         } catch (err) {
             console.error('Error initializing session:', err);
@@ -332,11 +295,11 @@ router.get('/', async (req, res) => {
     await initiateSession();
 });
 
-// Auto cleanup of old sessions every hour
+// Auto cleanup old sessions every hour
 setInterval(() => {
     const now = Date.now();
     for (const [num, session] of activeSessions.entries()) {
-        if (now - session.startTime > 3600000) { // 1 hour
+        if (now - session.startTime > 7200000) { // 2 hours
             console.log(`🧹 Auto-cleaning old session for ${num}`);
             if (session.directory && fs.existsSync(session.directory)) {
                 removeFile(session.directory);
@@ -352,7 +315,7 @@ setInterval(() => {
 }, 3600000);
 
 // Global uncaught exception handler
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', (err) {
     let e = String(err);
     if (e.includes("conflict")) {
         console.log("⚠️ Conflict error ignored - session already in use");
