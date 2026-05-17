@@ -1,5 +1,8 @@
 FROM node:20-slim
 
+# Install git (required for some npm packages)
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy package files
@@ -11,7 +14,7 @@ RUN npm install
 # Copy rest of the code
 COPY . .
 
-# Expose port (adjust if your app uses different port)
+# Expose port
 EXPOSE 3000
 
 # Start the app
