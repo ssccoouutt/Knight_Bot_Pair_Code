@@ -1,4 +1,0 @@
-yarn install
-git add yarn.lock
-git commit -m "Switch to yarn lockfile"
-git push origin main
