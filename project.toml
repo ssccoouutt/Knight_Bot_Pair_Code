@@ -1,6 +1,0 @@
-[build.config]
-  NPM_CLI = "npm"
-  NPM_FLAGS = "install"
-
-[build.buildpacks.heroku_nodejs_npm_install]
-  npm_install_flags = "--install"
